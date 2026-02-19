@@ -10,20 +10,18 @@ Claude Codeは会話のたびにJSONL形式のセッションログを `~/.claud
 このツールを使うと、すべてのセッションを日時・プロジェクト名・最初のメッセージとともに一覧表示し、不要なものを個別または一括で削除できます。
 入力履歴(`history.jsonl`)やプランファイル(`plans/`)の管理にも対応しています。
 
-
 ## 管理対象
 
 以下の `~/.claude/` 配下にあるデータを管理できます。
 
 | 種類 | パス | 説明 |
-|------|------|------|
+| ---- | ---- | ---- |
 | セッションログ | `projects/*/*.jsonl` | 各会話のJSONL形式ログファイルです |
 | 入力履歴 | `history.jsonl` | CLIで入力したコマンドの履歴です |
 | プランファイル | `plans/*.md` | Claude Codeが作成したプランのMarkdownファイルです |
 | デバッグログ | `debug/` | デバッグ用のログファイルです |
 | シェルスナップショット | `shell-snapshots/` | シェル状態のスナップショットです |
 | ファイル履歴 | `file-history/` | ファイル編集のバックアップです |
-
 
 ## アーキテクチャ
 
@@ -73,10 +71,9 @@ Richライブラリを使ったターミナル表示を担当します。
 
 パス定数(`CLAUDE_DIR`, `PROJECTS_DIR`, `HISTORY_FILE`, `PLANS_DIR`)とJSTタイムゾーンを定義しています。
 
-
 ## ディレクトリ構成
 
-```
+```shell
 claude-history-manager/
   pyproject.toml
   claude_history_manager/
@@ -96,7 +93,6 @@ claude-history-manager/
     test_ui.py
 ```
 
-
 ## セットアップ
 
 Python 3.11以上とuvが必要です。
@@ -108,7 +104,6 @@ uv sync
 # 開発用の依存パッケージも含めてインストールします
 uv sync --group dev
 ```
-
 
 ## 使い方
 
@@ -122,7 +117,7 @@ uv run claude-history
 
 メニューでは番号を入力して操作を選びます。
 
-```
+```text
 ╔══════════════════════════════════════╗
 ║        メインメニュー                ║
 ║                                      ║
@@ -177,7 +172,6 @@ uv run claude-history storage
 uv run claude-history search MangaViewer
 ```
 
-
 ## 開発
 
 ### リンターを実行する
@@ -201,7 +195,7 @@ uv run ruff format .
 ruffでは以下のルールセットを有効にしています。
 
 | ルール | 内容 |
-|--------|------|
+| ------ | ---- |
 | E, F, W | pyflakesとpycodestyleの基本ルールです |
 | I | importの並び順を検査します |
 | N | 命名規則を検査します |
@@ -245,13 +239,12 @@ uv run pytest tests/test_cli.py::TestSessionMenu
 uv run ruff check . && uv run ruff format --check . && uv run mypy claude_history_manager/ && uv run pytest
 ```
 
-
 ## テスト構成
 
 テストは4つのファイルに分かれています。
 
 | ファイル | テスト数 | テスト対象 |
-|----------|----------|------------|
+| ------- | ------- | ---------- |
 | test_parser.py | 45 | JSONL解析、タイムスタンプ変換、メッセージ分類の単体テストです |
 | test_storage.py | 37 | ファイルI/O、検索、削除の単体テストです |
 | test_ui.py | 39 | 表示関数の出力キャプチャテストです |
@@ -260,13 +253,11 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy claude_histor
 各テストファイルには正常系・異常系・境界値・エッジケースを含めています。
 結合テストではセッションの取得から検索・削除までの一連のライフサイクルを検証しています。
 
-
 ## 動作環境
 
 - Python 3.11以上が必要です
 - macOSとLinuxで動作します
 - uvによるパッケージ管理を前提としています
-
 
 ## ライセンス
 

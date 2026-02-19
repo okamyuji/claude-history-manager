@@ -48,9 +48,11 @@ def session_menu() -> None:
     while True:
         show_sessions(sessions, page, page_size)
         console.print(
-            "\n[dim]コマンド: [n]次ページ [p]前ページ [番号]詳細 [d 番号]削除 [b]戻る[/dim]"
+            "\n  [cyan]番号[/cyan] 詳細を見る   "
+            "[red]d 番号[/red] 削除   "
+            "[dim]n[/dim] 次ページ  [dim]p[/dim] 前ページ  [dim]b[/dim] 戻る"
         )
-        cmd = Prompt.ask("操作", default="b")
+        cmd = Prompt.ask("[dim]番号 or コマンド[/dim]", default="b")
 
         if cmd == "b":
             break
@@ -99,10 +101,12 @@ def history_menu() -> None:
     while True:
         sorted_entries = show_history(entries, page, page_size)
         console.print(
-            "\n[dim]コマンド: [n]次ページ [p]前ページ"
-            " [d 番号]削除 [d 範囲 例:d 1-10]範囲削除 [b]戻る[/dim]"
+            "\n  [red]d 番号[/red] 削除   "
+            "[red]d 1-10[/red] 範囲削除   "
+            "[red]d 1,3,5[/red] 複数削除\n"
+            "  [dim]n[/dim] 次ページ  [dim]p[/dim] 前ページ  [dim]b[/dim] 戻る"
         )
-        cmd = Prompt.ask("操作", default="b")
+        cmd = Prompt.ask("[dim]コマンド (d/n/p/b)[/dim]", default="b")
 
         if cmd == "b":
             break
@@ -159,8 +163,12 @@ def plan_menu() -> None:
 
     while True:
         show_plans(plans)
-        console.print("\n[dim]コマンド: [番号]内容表示 [d 番号]削除 [b]戻る[/dim]")
-        cmd = Prompt.ask("操作", default="b")
+        console.print(
+            "\n  [cyan]番号[/cyan] 内容を見る   "
+            "[red]d 番号[/red] 削除   "
+            "[dim]b[/dim] 戻る"
+        )
+        cmd = Prompt.ask("[dim]番号 or コマンド[/dim]", default="b")
 
         if cmd == "b":
             break
@@ -185,7 +193,7 @@ def plan_menu() -> None:
 
 def search_menu() -> None:
     """セッション検索メニュー"""
-    query = Prompt.ask("検索キーワード")
+    query = Prompt.ask("検索キーワード [dim](メッセージ・プロジェクト名・ブランチ名で検索)[/dim]")
     if not query:
         return
 
@@ -202,9 +210,11 @@ def search_menu() -> None:
     while True:
         show_sessions(results, page, 20)
         console.print(
-            "\n[dim]コマンド: [n]次ページ [p]前ページ [番号]詳細 [d 番号]削除 [b]戻る[/dim]"
+            "\n  [cyan]番号[/cyan] 詳細を見る   "
+            "[red]d 番号[/red] 削除   "
+            "[dim]n[/dim] 次ページ  [dim]p[/dim] 前ページ  [dim]b[/dim] 戻る"
         )
-        cmd = Prompt.ask("操作", default="b")
+        cmd = Prompt.ask("[dim]番号 or コマンド[/dim]", default="b")
 
         if cmd == "b":
             break
@@ -235,15 +245,22 @@ def bulk_delete_menu() -> None:
     console.print(
         Panel(
             "[bold]一括削除オプション[/bold]\n\n"
-            "  [cyan]1[/cyan]  日付で削除 (指定日より古いセッション)\n"
-            "  [cyan]2[/cyan]  プロジェクト指定削除\n"
-            "  [cyan]3[/cyan]  小サイズセッション削除 (空/極小)\n"
-            "  [cyan]b[/cyan]  戻る",
+            "  [cyan]1[/cyan] / [cyan]d[/cyan]  日付で削除 (指定日より古いセッション)\n"
+            "  [cyan]2[/cyan] / [cyan]p[/cyan]  プロジェクト指定削除\n"
+            "  [cyan]3[/cyan] / [cyan]s[/cyan]  小サイズセッション削除 (空/極小)\n"
+            "  [cyan]b[/cyan]      戻る",
             box=box.ROUNDED,
         )
     )
 
-    choice = Prompt.ask("選択", choices=["1", "2", "3", "b"], default="b")
+    choice = Prompt.ask(
+        "選択 [dim](d/p/s/b)[/dim]",
+        choices=["1", "2", "3", "d", "p", "s", "b"],
+        default="b",
+    )
+    # ショートカットを番号に正規化
+    shortcut_map = {"d": "1", "p": "2", "s": "3"}
+    choice = shortcut_map.get(choice, choice)
     if choice == "b":
         return
 
@@ -309,34 +326,38 @@ def main_menu() -> None:
         console.print(
             Panel(
                 "[bold]Claude Code 履歴管理ツール[/bold]\n\n"
-                "  [cyan]1[/cyan]  セッション会話ログ一覧\n"
-                "  [cyan]2[/cyan]  入力履歴 (history.jsonl)\n"
-                "  [cyan]3[/cyan]  プランファイル\n"
-                "  [cyan]4[/cyan]  セッション検索\n"
-                "  [cyan]5[/cyan]  一括削除 (古いセッション)\n"
-                "  [cyan]6[/cyan]  ストレージ使用状況\n"
-                "  [cyan]q[/cyan]  終了",
+                "  [cyan]1[/cyan] / [cyan]s[/cyan]  セッション会話ログ一覧\n"
+                "  [cyan]2[/cyan] / [cyan]h[/cyan]  入力履歴 (history.jsonl)\n"
+                "  [cyan]3[/cyan] / [cyan]p[/cyan]  プランファイル\n"
+                "  [cyan]4[/cyan] / [cyan]f[/cyan]  セッション検索\n"
+                "  [cyan]5[/cyan] / [cyan]x[/cyan]  一括削除 (古いセッション)\n"
+                "  [cyan]6[/cyan] / [cyan]i[/cyan]  ストレージ使用状況\n"
+                "  [cyan]q[/cyan]      終了",
                 title="メインメニュー",
                 box=box.DOUBLE,
             )
         )
 
-        choice = Prompt.ask("選択", choices=["1", "2", "3", "4", "5", "6", "q"], default="1")
+        choice = Prompt.ask(
+            "選択 [dim](s/h/p/f/x/i/q)[/dim]",
+            choices=["1", "2", "3", "4", "5", "6", "s", "h", "p", "f", "x", "i", "q"],
+            default="s",
+        )
 
-        if choice == "q":
+        if choice in ("q",):
             console.print("[dim]終了します[/dim]")
             break
-        elif choice == "1":
+        elif choice in ("1", "s"):
             session_menu()
-        elif choice == "2":
+        elif choice in ("2", "h"):
             history_menu()
-        elif choice == "3":
+        elif choice in ("3", "p"):
             plan_menu()
-        elif choice == "4":
+        elif choice in ("4", "f"):
             search_menu()
-        elif choice == "5":
+        elif choice in ("5", "x"):
             bulk_delete_menu()
-        elif choice == "6":
+        elif choice in ("6", "i"):
             show_storage(get_storage_info())
 
 
