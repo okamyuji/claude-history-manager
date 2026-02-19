@@ -12,6 +12,7 @@ from rich.console import Console
 
 from claude_history_manager.cli import (
     bulk_delete_menu,
+    claude_mem_menu,
     history_menu,
     main,
     main_menu,
@@ -1125,3 +1126,292 @@ class TestIntegration:
         output = buf.getvalue()
         assert "セッション詳細" in output
         assert info["id"] in output
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# claude_mem_menu
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+_MEM_INFO: dict[str, Any] = {
+    "main_db_bytes": 40 * 1024 * 1024,
+    "chroma_db_bytes": 76 * 1024 * 1024,
+    "logs_bytes": 7 * 1024 * 1024,
+    "logs_count": 22,
+    "observations_count": 4062,
+    "sessions_count": 180,
+}
+
+
+class TestClaudeMemMenu:
+    def test_not_available(self) -> None:
+        import claude_history_manager.cli as cli_mod
+
+        c, buf = _capture_console()
+        orig = cli_mod.console
+        cli_mod.console = c
+        with patch(f"{CLI}.get_claude_mem_info", return_value=None):
+            try:
+                claude_mem_menu()
+            finally:
+                cli_mod.console = orig
+        assert "見つかりません" in buf.getvalue()
+
+    def test_back(self) -> None:
+        import claude_history_manager.cli as cli_mod
+
+        c, buf = _capture_console()
+        orig = cli_mod.console
+        cli_mod.console = c
+        with (
+            patch(f"{CLI}.get_claude_mem_info", return_value=_MEM_INFO),
+            patch(f"{CLI}.Prompt") as mock_prompt,
+        ):
+            mock_prompt.ask.return_value = "b"
+            try:
+                claude_mem_menu()
+            finally:
+                cli_mod.console = orig
+        output = buf.getvalue()
+        assert "claude-mem" in output
+        assert "4,062" in output
+
+    def test_vacuum_main_db(self) -> None:
+        import claude_history_manager.cli as cli_mod
+
+        c, buf = _capture_console()
+        orig = cli_mod.console
+        cli_mod.console = c
+        with (
+            patch(f"{CLI}.get_claude_mem_info", return_value=_MEM_INFO),
+            patch(f"{CLI}.Prompt") as mock_prompt,
+            patch(f"{CLI}.vacuum_claude_mem_db", return_value=(40000000, 38000000)),
+        ):
+            mock_prompt.ask.side_effect = ["2", "b"]
+            try:
+                claude_mem_menu()
+            finally:
+                cli_mod.console = orig
+        output = buf.getvalue()
+        assert "VACUUM" in output
+
+    def test_vacuum_chroma_db(self) -> None:
+        import claude_history_manager.cli as cli_mod
+
+        c, buf = _capture_console()
+        orig = cli_mod.console
+        cli_mod.console = c
+        with (
+            patch(f"{CLI}.get_claude_mem_info", return_value=_MEM_INFO),
+            patch(f"{CLI}.Prompt") as mock_prompt,
+            patch(f"{CLI}.vacuum_chroma_db", return_value=(76000000, 70000000)),
+        ):
+            mock_prompt.ask.side_effect = ["3", "b"]
+            try:
+                claude_mem_menu()
+            finally:
+                cli_mod.console = orig
+        output = buf.getvalue()
+        assert "ChromaDB" in output
+
+    def test_rebuild_fts(self) -> None:
+        import claude_history_manager.cli as cli_mod
+
+        c, buf = _capture_console()
+        orig = cli_mod.console
+        cli_mod.console = c
+        with (
+            patch(f"{CLI}.get_claude_mem_info", return_value=_MEM_INFO),
+            patch(f"{CLI}.Prompt") as mock_prompt,
+            patch(f"{CLI}.rebuild_fts_indexes", return_value=True),
+        ):
+            mock_prompt.ask.side_effect = ["4", "b"]
+            try:
+                claude_mem_menu()
+            finally:
+                cli_mod.console = orig
+        assert "FTS" in buf.getvalue()
+
+    def test_cleanup_logs(self) -> None:
+        import claude_history_manager.cli as cli_mod
+
+        c, buf = _capture_console()
+        orig = cli_mod.console
+        cli_mod.console = c
+        with (
+            patch(f"{CLI}.get_claude_mem_info", return_value=_MEM_INFO),
+            patch(f"{CLI}.Prompt") as mock_prompt,
+            patch(f"{CLI}.cleanup_old_logs", return_value=(5, 3000000)),
+        ):
+            mock_prompt.ask.side_effect = ["5", "b"]
+            try:
+                claude_mem_menu()
+            finally:
+                cli_mod.console = orig
+        assert "5ファイル削除" in buf.getvalue()
+
+    def test_vacuum_all(self) -> None:
+        import claude_history_manager.cli as cli_mod
+
+        c, buf = _capture_console()
+        orig = cli_mod.console
+        cli_mod.console = c
+        with (
+            patch(f"{CLI}.get_claude_mem_info", return_value=_MEM_INFO),
+            patch(f"{CLI}.Prompt") as mock_prompt,
+            patch(f"{CLI}.vacuum_claude_mem_db", return_value=(40000000, 38000000)),
+            patch(f"{CLI}.vacuum_chroma_db", return_value=(76000000, 70000000)),
+            patch(f"{CLI}.rebuild_fts_indexes", return_value=True),
+            patch(f"{CLI}.cleanup_old_logs", return_value=(3, 1000000)),
+        ):
+            mock_prompt.ask.side_effect = ["1", "b"]
+            try:
+                claude_mem_menu()
+            finally:
+                cli_mod.console = orig
+        output = buf.getvalue()
+        assert "すべての最適化が完了" in output
+
+    def test_vacuum_main_db_not_found(self) -> None:
+        import claude_history_manager.cli as cli_mod
+
+        c, buf = _capture_console()
+        orig = cli_mod.console
+        cli_mod.console = c
+        with (
+            patch(f"{CLI}.get_claude_mem_info", return_value=_MEM_INFO),
+            patch(f"{CLI}.Prompt") as mock_prompt,
+            patch(f"{CLI}.vacuum_claude_mem_db", return_value=(0, 0)),
+        ):
+            mock_prompt.ask.side_effect = ["2", "b"]
+            try:
+                claude_mem_menu()
+            finally:
+                cli_mod.console = orig
+        assert "メインDBが見つかりません" in buf.getvalue()
+
+    def test_chroma_db_not_found(self) -> None:
+        import claude_history_manager.cli as cli_mod
+
+        c, buf = _capture_console()
+        orig = cli_mod.console
+        cli_mod.console = c
+        with (
+            patch(f"{CLI}.get_claude_mem_info", return_value=_MEM_INFO),
+            patch(f"{CLI}.Prompt") as mock_prompt,
+            patch(f"{CLI}.vacuum_chroma_db", return_value=(0, 0)),
+        ):
+            mock_prompt.ask.side_effect = ["3", "b"]
+            try:
+                claude_mem_menu()
+            finally:
+                cli_mod.console = orig
+        assert "ChromaDBが見つかりません" in buf.getvalue()
+
+    def test_fts_rebuild_not_found(self) -> None:
+        import claude_history_manager.cli as cli_mod
+
+        c, buf = _capture_console()
+        orig = cli_mod.console
+        cli_mod.console = c
+        with (
+            patch(f"{CLI}.get_claude_mem_info", return_value=_MEM_INFO),
+            patch(f"{CLI}.Prompt") as mock_prompt,
+            patch(f"{CLI}.rebuild_fts_indexes", return_value=False),
+        ):
+            mock_prompt.ask.side_effect = ["4", "b"]
+            try:
+                claude_mem_menu()
+            finally:
+                cli_mod.console = orig
+        assert "メインDBが見つかりません" in buf.getvalue()
+
+    def test_no_old_logs(self) -> None:
+        import claude_history_manager.cli as cli_mod
+
+        c, buf = _capture_console()
+        orig = cli_mod.console
+        cli_mod.console = c
+        with (
+            patch(f"{CLI}.get_claude_mem_info", return_value=_MEM_INFO),
+            patch(f"{CLI}.Prompt") as mock_prompt,
+            patch(f"{CLI}.cleanup_old_logs", return_value=(0, 0)),
+        ):
+            mock_prompt.ask.side_effect = ["5", "b"]
+            try:
+                claude_mem_menu()
+            finally:
+                cli_mod.console = orig
+        assert "削除対象のログはありません" in buf.getvalue()
+
+
+class TestMainMenuWithClaudeMem:
+    def test_claude_mem_shown_when_available(self) -> None:
+        import claude_history_manager.cli as cli_mod
+
+        c, buf = _capture_console()
+        orig = cli_mod.console
+        cli_mod.console = c
+        with (
+            patch(f"{CLI}.get_claude_mem_info", return_value=_MEM_INFO),
+            patch(f"{CLI}.Prompt") as mock_prompt,
+        ):
+            mock_prompt.ask.return_value = "q"
+            try:
+                main_menu()
+            finally:
+                cli_mod.console = orig
+        assert "claude-mem" in buf.getvalue()
+
+    def test_claude_mem_hidden_when_unavailable(self) -> None:
+        import claude_history_manager.cli as cli_mod
+
+        c, buf = _capture_console()
+        orig = cli_mod.console
+        cli_mod.console = c
+        with (
+            patch(f"{CLI}.get_claude_mem_info", return_value=None),
+            patch(f"{CLI}.Prompt") as mock_prompt,
+        ):
+            mock_prompt.ask.return_value = "q"
+            try:
+                main_menu()
+            finally:
+                cli_mod.console = orig
+        assert "claude-mem" not in buf.getvalue()
+
+    def test_choice_7_opens_claude_mem(self) -> None:
+        import claude_history_manager.cli as cli_mod
+
+        c, _ = _capture_console()
+        orig = cli_mod.console
+        cli_mod.console = c
+        with (
+            patch(f"{CLI}.get_claude_mem_info", return_value=_MEM_INFO),
+            patch(f"{CLI}.Prompt") as mock_prompt,
+            patch(f"{CLI}.claude_mem_menu") as mock_menu,
+        ):
+            mock_prompt.ask.side_effect = ["7", "q"]
+            try:
+                main_menu()
+            finally:
+                cli_mod.console = orig
+        mock_menu.assert_called_once()
+
+    def test_shortcut_v_opens_claude_mem(self) -> None:
+        import claude_history_manager.cli as cli_mod
+
+        c, _ = _capture_console()
+        orig = cli_mod.console
+        cli_mod.console = c
+        with (
+            patch(f"{CLI}.get_claude_mem_info", return_value=_MEM_INFO),
+            patch(f"{CLI}.Prompt") as mock_prompt,
+            patch(f"{CLI}.claude_mem_menu") as mock_menu,
+        ):
+            mock_prompt.ask.side_effect = ["v", "q"]
+            try:
+                main_menu()
+            finally:
+                cli_mod.console = orig
+        mock_menu.assert_called_once()

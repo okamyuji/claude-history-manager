@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
+import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from .config import HISTORY_FILE, JST, PLANS_DIR, PROJECTS_DIR
+from .config import CLAUDE_MEM_DIR, HISTORY_FILE, JST, PLANS_DIR, PROJECTS_DIR
 from .parser import parse_jsonl_session
 
 if TYPE_CHECKING:
@@ -160,3 +162,128 @@ def get_storage_info() -> list[tuple[str, Path, int, int]]:
             info.append((name, d, len(files), total))
 
     return info
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# claude-mem 最適化
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _db_file_size(db_path: Path) -> int:
+    """DBファイルとWAL/SHMファイルの合計サイズを返す"""
+    total = db_path.stat().st_size if db_path.exists() else 0
+    for suffix in ("-wal", "-shm"):
+        wal = db_path.parent / (db_path.name + suffix)
+        if wal.exists():
+            total += wal.stat().st_size
+    return total
+
+
+def get_claude_mem_info() -> dict[str, Any] | None:
+    """claude-memの情報を取得する。未導入ならNoneを返す。"""
+    if not CLAUDE_MEM_DIR.exists():
+        return None
+
+    main_db = CLAUDE_MEM_DIR / "claude-mem.db"
+    chroma_db = CLAUDE_MEM_DIR / "vector-db" / "chroma.sqlite3"
+    logs_dir = CLAUDE_MEM_DIR / "logs"
+
+    info: dict[str, Any] = {
+        "main_db_bytes": _db_file_size(main_db) if main_db.exists() else 0,
+        "chroma_db_bytes": _db_file_size(chroma_db) if chroma_db.exists() else 0,
+        "logs_bytes": 0,
+        "logs_count": 0,
+        "observations_count": 0,
+        "sessions_count": 0,
+    }
+
+    if logs_dir.exists():
+        log_files = [f for f in logs_dir.iterdir() if f.is_file()]
+        info["logs_count"] = len(log_files)
+        info["logs_bytes"] = sum(f.stat().st_size for f in log_files)
+
+    if main_db.exists():
+        try:
+            conn = sqlite3.connect(f"file:{main_db}?mode=ro", uri=True)
+            try:
+                row = conn.execute("SELECT COUNT(*) FROM observations").fetchone()
+                info["observations_count"] = row[0] if row else 0
+                row = conn.execute("SELECT COUNT(*) FROM session_summaries").fetchone()
+                info["sessions_count"] = row[0] if row else 0
+            finally:
+                conn.close()
+        except (sqlite3.OperationalError, sqlite3.DatabaseError):
+            pass
+
+    return info
+
+
+def vacuum_claude_mem_db() -> tuple[int, int]:
+    """claude-mem.dbをVACUUM+ANALYZEする。(before_bytes, after_bytes)を返す。"""
+    db_path = CLAUDE_MEM_DIR / "claude-mem.db"
+    if not db_path.exists():
+        return (0, 0)
+
+    before = _db_file_size(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("VACUUM")
+        conn.execute("ANALYZE")
+    finally:
+        conn.close()
+    after = _db_file_size(db_path)
+    return (before, after)
+
+
+def vacuum_chroma_db() -> tuple[int, int]:
+    """ChromaDBのSQLiteをVACUUMする。(before_bytes, after_bytes)を返す。"""
+    db_path = CLAUDE_MEM_DIR / "vector-db" / "chroma.sqlite3"
+    if not db_path.exists():
+        return (0, 0)
+
+    before = _db_file_size(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("VACUUM")
+    finally:
+        conn.close()
+    after = _db_file_size(db_path)
+    return (before, after)
+
+
+def rebuild_fts_indexes() -> bool:
+    """claude-mem.dbのFTS5インデックスを再構築する。"""
+    db_path = CLAUDE_MEM_DIR / "claude-mem.db"
+    if not db_path.exists():
+        return False
+
+    fts_tables = ["observations_fts", "session_summaries_fts", "user_prompts_fts"]
+    conn = sqlite3.connect(str(db_path))
+    try:
+        for table in fts_tables:
+            try:
+                conn.execute(f"INSERT INTO {table}({table}) VALUES('rebuild')")  # noqa: S608
+            except sqlite3.OperationalError:
+                continue
+        conn.commit()
+    finally:
+        conn.close()
+    return True
+
+
+def cleanup_old_logs(days: int = 7) -> tuple[int, int]:
+    """古いログファイルを削除する。(deleted_count, freed_bytes)を返す。"""
+    logs_dir = CLAUDE_MEM_DIR / "logs"
+    if not logs_dir.exists():
+        return (0, 0)
+
+    cutoff = time.time() - days * 86400
+    deleted = 0
+    freed = 0
+    for f in logs_dir.iterdir():
+        if f.is_file() and f.stat().st_mtime < cutoff:
+            size = f.stat().st_size
+            f.unlink()
+            deleted += 1
+            freed += size
+    return (deleted, freed)

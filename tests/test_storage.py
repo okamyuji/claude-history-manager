@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import time
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 from claude_history_manager.storage import (
+    cleanup_old_logs,
     delete_history_entries,
     delete_plan,
     delete_session,
     get_all_sessions,
+    get_claude_mem_info,
     get_history_entries,
     get_plan_files,
     get_storage_info,
+    rebuild_fts_indexes,
     search_sessions,
+    vacuum_chroma_db,
+    vacuum_claude_mem_db,
 )
 
 if TYPE_CHECKING:
@@ -314,3 +321,255 @@ class TestGetStorageInfo:
         ):
             info = get_storage_info()
         assert info == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# claude-mem: ヘルパー
+# ═══════════════════════════════════════════════════════════════════════════════
+
+STORAGE = "claude_history_manager.storage"
+
+
+def _create_claude_mem_dir(tmp_path: Path) -> Path:
+    """テスト用のclaude-memディレクトリ構造を作成"""
+    mem_dir = tmp_path / ".claude-mem"
+    mem_dir.mkdir()
+
+    # メインDB
+    db_path = mem_dir / "claude-mem.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE observations (id INTEGER PRIMARY KEY, title TEXT, text TEXT)")
+    conn.execute("CREATE TABLE session_summaries (id INTEGER PRIMARY KEY, request TEXT)")
+    # FTS5テーブル
+    conn.execute(
+        "CREATE VIRTUAL TABLE observations_fts USING fts5(title, text, content=observations)"
+    )
+    conn.execute(
+        "CREATE VIRTUAL TABLE session_summaries_fts USING fts5(request, content=session_summaries)"
+    )
+    conn.execute("CREATE VIRTUAL TABLE user_prompts_fts USING fts5(prompt_text)")
+    # テストデータ
+    for i in range(100):
+        conn.execute(
+            "INSERT INTO observations (title, text) VALUES (?, ?)",
+            (f"obs-{i}", f"text-{i}" * 100),
+        )
+    for i in range(10):
+        conn.execute(
+            "INSERT INTO session_summaries (request) VALUES (?)",
+            (f"session-{i}",),
+        )
+    conn.commit()
+    conn.close()
+
+    # ChromaDB
+    vector_dir = mem_dir / "vector-db"
+    vector_dir.mkdir()
+    chroma_path = vector_dir / "chroma.sqlite3"
+    conn = sqlite3.connect(str(chroma_path))
+    conn.execute("CREATE TABLE test_data (id INTEGER PRIMARY KEY, data TEXT)")
+    for i in range(100):
+        conn.execute("INSERT INTO test_data (data) VALUES (?)", (f"data-{i}" * 100,))
+    conn.commit()
+    conn.close()
+
+    # ログ
+    logs_dir = mem_dir / "logs"
+    logs_dir.mkdir()
+    # 古いログ (8日前)
+    old_log = logs_dir / "old.log"
+    old_log.write_text("old log content " * 100)
+    import os
+
+    old_time = time.time() - 8 * 86400
+    os.utime(old_log, (old_time, old_time))
+    # 新しいログ
+    new_log = logs_dir / "new.log"
+    new_log.write_text("new log content")
+
+    return mem_dir
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# get_claude_mem_info
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestGetClaudeMemInfo:
+    def test_returns_info(self, tmp_path: Path) -> None:
+        mem_dir = _create_claude_mem_dir(tmp_path)
+        with patch(f"{STORAGE}.CLAUDE_MEM_DIR", mem_dir):
+            info = get_claude_mem_info()
+        assert info is not None
+        assert info["observations_count"] == 100
+        assert info["sessions_count"] == 10
+        assert info["main_db_bytes"] > 0
+        assert info["chroma_db_bytes"] > 0
+        assert info["logs_count"] == 2
+        assert info["logs_bytes"] > 0
+
+    def test_not_installed(self, tmp_path: Path) -> None:
+        with patch(f"{STORAGE}.CLAUDE_MEM_DIR", tmp_path / "nonexistent"):
+            assert get_claude_mem_info() is None
+
+    def test_no_main_db(self, tmp_path: Path) -> None:
+        mem_dir = tmp_path / ".claude-mem"
+        mem_dir.mkdir()
+        with patch(f"{STORAGE}.CLAUDE_MEM_DIR", mem_dir):
+            info = get_claude_mem_info()
+        assert info is not None
+        assert info["main_db_bytes"] == 0
+        assert info["observations_count"] == 0
+
+    def test_no_chroma_db(self, tmp_path: Path) -> None:
+        mem_dir = tmp_path / ".claude-mem"
+        mem_dir.mkdir()
+        with patch(f"{STORAGE}.CLAUDE_MEM_DIR", mem_dir):
+            info = get_claude_mem_info()
+        assert info is not None
+        assert info["chroma_db_bytes"] == 0
+
+    def test_no_logs_dir(self, tmp_path: Path) -> None:
+        mem_dir = tmp_path / ".claude-mem"
+        mem_dir.mkdir()
+        with patch(f"{STORAGE}.CLAUDE_MEM_DIR", mem_dir):
+            info = get_claude_mem_info()
+        assert info is not None
+        assert info["logs_count"] == 0
+        assert info["logs_bytes"] == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# vacuum_claude_mem_db
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestVacuumClaudeMemDb:
+    def test_vacuum_success(self, tmp_path: Path) -> None:
+        mem_dir = _create_claude_mem_dir(tmp_path)
+        db_path = mem_dir / "claude-mem.db"
+        # 大量データ挿入後に削除してフラグメント化させる
+        conn = sqlite3.connect(str(db_path))
+        for i in range(500):
+            conn.execute(
+                "INSERT INTO observations (title, text) VALUES (?, ?)",
+                (f"bulk-{i}", "x" * 1000),
+            )
+        conn.commit()
+        conn.execute("DELETE FROM observations WHERE title LIKE 'bulk-%'")
+        conn.commit()
+        conn.close()
+
+        with patch(f"{STORAGE}.CLAUDE_MEM_DIR", mem_dir):
+            before, after = vacuum_claude_mem_db()
+        assert before > 0
+        assert after > 0
+        assert after <= before
+
+    def test_db_not_found(self, tmp_path: Path) -> None:
+        mem_dir = tmp_path / ".claude-mem"
+        mem_dir.mkdir()
+        with patch(f"{STORAGE}.CLAUDE_MEM_DIR", mem_dir):
+            assert vacuum_claude_mem_db() == (0, 0)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# vacuum_chroma_db
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestVacuumChromaDb:
+    def test_vacuum_success(self, tmp_path: Path) -> None:
+        mem_dir = _create_claude_mem_dir(tmp_path)
+        chroma_path = mem_dir / "vector-db" / "chroma.sqlite3"
+        # フラグメント化させる
+        conn = sqlite3.connect(str(chroma_path))
+        for _i in range(500):
+            conn.execute("INSERT INTO test_data (data) VALUES (?)", ("y" * 1000,))
+        conn.commit()
+        conn.execute("DELETE FROM test_data WHERE id > 100")
+        conn.commit()
+        conn.close()
+
+        with patch(f"{STORAGE}.CLAUDE_MEM_DIR", mem_dir):
+            before, after = vacuum_chroma_db()
+        assert before > 0
+        assert after > 0
+        assert after <= before
+
+    def test_db_not_found(self, tmp_path: Path) -> None:
+        mem_dir = tmp_path / ".claude-mem"
+        mem_dir.mkdir()
+        with patch(f"{STORAGE}.CLAUDE_MEM_DIR", mem_dir):
+            assert vacuum_chroma_db() == (0, 0)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# rebuild_fts_indexes
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRebuildFtsIndexes:
+    def test_rebuild_success(self, tmp_path: Path) -> None:
+        mem_dir = _create_claude_mem_dir(tmp_path)
+        with patch(f"{STORAGE}.CLAUDE_MEM_DIR", mem_dir):
+            assert rebuild_fts_indexes() is True
+
+    def test_db_not_found(self, tmp_path: Path) -> None:
+        mem_dir = tmp_path / ".claude-mem"
+        mem_dir.mkdir()
+        with patch(f"{STORAGE}.CLAUDE_MEM_DIR", mem_dir):
+            assert rebuild_fts_indexes() is False
+
+    def test_missing_fts_tables_skipped(self, tmp_path: Path) -> None:
+        """FTSテーブルが一部存在しなくてもエラーにならない"""
+        mem_dir = tmp_path / ".claude-mem"
+        mem_dir.mkdir()
+        db_path = mem_dir / "claude-mem.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE dummy (id INTEGER)")
+        conn.close()
+        with patch(f"{STORAGE}.CLAUDE_MEM_DIR", mem_dir):
+            assert rebuild_fts_indexes() is True
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# cleanup_old_logs
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCleanupOldLogs:
+    def test_deletes_old_logs(self, tmp_path: Path) -> None:
+        mem_dir = _create_claude_mem_dir(tmp_path)
+        with patch(f"{STORAGE}.CLAUDE_MEM_DIR", mem_dir):
+            deleted, freed = cleanup_old_logs(days=7)
+        assert deleted == 1
+        assert freed > 0
+        # 新しいログは残っている
+        assert (mem_dir / "logs" / "new.log").exists()
+        # 古いログは削除
+        assert not (mem_dir / "logs" / "old.log").exists()
+
+    def test_no_old_logs(self, tmp_path: Path) -> None:
+        mem_dir = tmp_path / ".claude-mem"
+        mem_dir.mkdir()
+        logs_dir = mem_dir / "logs"
+        logs_dir.mkdir()
+        (logs_dir / "recent.log").write_text("recent")
+        with patch(f"{STORAGE}.CLAUDE_MEM_DIR", mem_dir):
+            deleted, freed = cleanup_old_logs(days=7)
+        assert deleted == 0
+        assert freed == 0
+
+    def test_logs_dir_missing(self, tmp_path: Path) -> None:
+        mem_dir = tmp_path / ".claude-mem"
+        mem_dir.mkdir()
+        with patch(f"{STORAGE}.CLAUDE_MEM_DIR", mem_dir):
+            assert cleanup_old_logs() == (0, 0)
+
+    def test_custom_days(self, tmp_path: Path) -> None:
+        mem_dir = _create_claude_mem_dir(tmp_path)
+        # days=30 なら8日前のログは削除されない
+        with patch(f"{STORAGE}.CLAUDE_MEM_DIR", mem_dir):
+            deleted, freed = cleanup_old_logs(days=30)
+        assert deleted == 0

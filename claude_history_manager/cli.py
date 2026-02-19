@@ -12,14 +12,19 @@ from rich.prompt import Confirm, IntPrompt, Prompt
 
 from .config import JST
 from .storage import (
+    cleanup_old_logs,
     delete_history_entries,
     delete_plan,
     delete_session,
     get_all_sessions,
+    get_claude_mem_info,
     get_history_entries,
     get_plan_files,
     get_storage_info,
+    rebuild_fts_indexes,
     search_sessions,
+    vacuum_chroma_db,
+    vacuum_claude_mem_db,
 )
 from .ui import (
     console,
@@ -164,9 +169,7 @@ def plan_menu() -> None:
     while True:
         show_plans(plans)
         console.print(
-            "\n  [cyan]番号[/cyan] 内容を見る   "
-            "[red]d 番号[/red] 削除   "
-            "[dim]b[/dim] 戻る"
+            "\n  [cyan]番号[/cyan] 内容を見る   [red]d 番号[/red] 削除   [dim]b[/dim] 戻る"
         )
         cmd = Prompt.ask("[dim]番号 or コマンド[/dim]", default="b")
 
@@ -319,28 +322,131 @@ def bulk_delete_menu() -> None:
         console.print(f"[green]{deleted}件削除しました[/green]")
 
 
-def main_menu() -> None:
-    """メインメニューループ"""
+def _format_bytes(n: int) -> str:
+    """バイト数を読みやすい形式にフォーマット"""
+    if n < 1024:
+        return f"{n}B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f}KB"
+    return f"{n / (1024 * 1024):.1f}MB"
+
+
+def claude_mem_menu() -> None:
+    """claude-mem最適化メニュー"""
+    mem_info = get_claude_mem_info()
+    if not mem_info:
+        console.print("[yellow]claude-memが見つかりません[/yellow]")
+        return
+
     while True:
-        console.print()
+        # 情報を毎回取得して最新値を表示
+        mem_info = get_claude_mem_info()
+        if not mem_info:
+            break
+
+        status_lines = (
+            f"  メインDB: [bold]{_format_bytes(mem_info['main_db_bytes'])}[/bold]"
+            f" (observations: {mem_info['observations_count']:,}件,"
+            f" sessions: {mem_info['sessions_count']:,}件)\n"
+            f"  ChromaDB: [bold]{_format_bytes(mem_info['chroma_db_bytes'])}[/bold]\n"
+            f"  ログ: [bold]{_format_bytes(mem_info['logs_bytes'])}[/bold]"
+            f" ({mem_info['logs_count']}ファイル)"
+        )
+
         console.print(
             Panel(
-                "[bold]Claude Code 履歴管理ツール[/bold]\n\n"
-                "  [cyan]1[/cyan] / [cyan]s[/cyan]  セッション会話ログ一覧\n"
-                "  [cyan]2[/cyan] / [cyan]h[/cyan]  入力履歴 (history.jsonl)\n"
-                "  [cyan]3[/cyan] / [cyan]p[/cyan]  プランファイル\n"
-                "  [cyan]4[/cyan] / [cyan]f[/cyan]  セッション検索\n"
-                "  [cyan]5[/cyan] / [cyan]x[/cyan]  一括削除 (古いセッション)\n"
-                "  [cyan]6[/cyan] / [cyan]i[/cyan]  ストレージ使用状況\n"
-                "  [cyan]q[/cyan]      終了",
-                title="メインメニュー",
-                box=box.DOUBLE,
+                f"[bold]claude-mem 最適化[/bold]\n\n{status_lines}\n\n"
+                "  [cyan]1[/cyan] / [cyan]a[/cyan]  すべて実行 (VACUUM + FTS再構築 + ログ削除)\n"
+                "  [cyan]2[/cyan] / [cyan]m[/cyan]  メインDB VACUUM\n"
+                "  [cyan]3[/cyan] / [cyan]c[/cyan]  ChromaDB VACUUM\n"
+                "  [cyan]4[/cyan] / [cyan]f[/cyan]  FTSインデックス再構築\n"
+                "  [cyan]5[/cyan] / [cyan]l[/cyan]  古いログ削除 (7日以前)\n"
+                "  [cyan]b[/cyan]      戻る",
+                box=box.ROUNDED,
             )
         )
 
         choice = Prompt.ask(
+            "選択 [dim](a/m/c/f/l/b)[/dim]",
+            choices=["1", "2", "3", "4", "5", "a", "m", "c", "f", "l", "b"],
+            default="b",
+        )
+        shortcut_map = {"a": "1", "m": "2", "c": "3", "f": "4", "l": "5"}
+        choice = shortcut_map.get(choice, choice)
+
+        if choice == "b":
+            break
+
+        if choice in ("1", "2"):
+            console.print("[dim]メインDB VACUUM実行中...[/dim]")
+            before, after = vacuum_claude_mem_db()
+            if before > 0:
+                console.print(
+                    f"  メインDB: {_format_bytes(before)} → {_format_bytes(after)}"
+                    f" ([green]-{_format_bytes(before - after)}[/green])"
+                )
+            else:
+                console.print("  [yellow]メインDBが見つかりません[/yellow]")
+
+        if choice in ("1", "3"):
+            console.print("[dim]ChromaDB VACUUM実行中...[/dim]")
+            before, after = vacuum_chroma_db()
+            if before > 0:
+                console.print(
+                    f"  ChromaDB: {_format_bytes(before)} → {_format_bytes(after)}"
+                    f" ([green]-{_format_bytes(before - after)}[/green])"
+                )
+            else:
+                console.print("  [yellow]ChromaDBが見つかりません[/yellow]")
+
+        if choice in ("1", "4"):
+            console.print("[dim]FTSインデックス再構築中...[/dim]")
+            if rebuild_fts_indexes():
+                console.print("  [green]FTSインデックスを再構築しました[/green]")
+            else:
+                console.print("  [yellow]メインDBが見つかりません[/yellow]")
+
+        if choice in ("1", "5"):
+            deleted_count, freed_bytes = cleanup_old_logs()
+            if deleted_count > 0:
+                console.print(
+                    f"  [green]{deleted_count}ファイル削除 (-{_format_bytes(freed_bytes)})[/green]"
+                )
+            else:
+                console.print("  [dim]削除対象のログはありません[/dim]")
+
+        if choice == "1":
+            console.print("\n[green]すべての最適化が完了しました[/green]")
+
+
+def main_menu() -> None:
+    """メインメニューループ"""
+    has_claude_mem = get_claude_mem_info() is not None
+
+    while True:
+        console.print()
+        menu_items = (
+            "[bold]Claude Code 履歴管理ツール[/bold]\n\n"
+            "  [cyan]1[/cyan] / [cyan]s[/cyan]  セッション会話ログ一覧\n"
+            "  [cyan]2[/cyan] / [cyan]h[/cyan]  入力履歴 (history.jsonl)\n"
+            "  [cyan]3[/cyan] / [cyan]p[/cyan]  プランファイル\n"
+            "  [cyan]4[/cyan] / [cyan]f[/cyan]  セッション検索\n"
+            "  [cyan]5[/cyan] / [cyan]x[/cyan]  一括削除 (古いセッション)\n"
+            "  [cyan]6[/cyan] / [cyan]i[/cyan]  ストレージ使用状況\n"
+        )
+        if has_claude_mem:
+            menu_items += "  [cyan]7[/cyan] / [cyan]v[/cyan]  claude-mem 最適化\n"
+        menu_items += "  [cyan]q[/cyan]      終了"
+
+        console.print(Panel(menu_items, title="メインメニュー", box=box.DOUBLE))
+
+        valid = ["1", "2", "3", "4", "5", "6", "s", "h", "p", "f", "x", "i", "q"]
+        if has_claude_mem:
+            valid.extend(["7", "v"])
+
+        choice = Prompt.ask(
             "選択 [dim](s/h/p/f/x/i/q)[/dim]",
-            choices=["1", "2", "3", "4", "5", "6", "s", "h", "p", "f", "x", "i", "q"],
+            choices=valid,
             default="s",
         )
 
@@ -359,6 +465,8 @@ def main_menu() -> None:
             bulk_delete_menu()
         elif choice in ("6", "i"):
             show_storage(get_storage_info())
+        elif has_claude_mem and choice in ("7", "v"):
+            claude_mem_menu()
 
 
 def main() -> None:
