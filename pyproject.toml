@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Claude Code session history management tool"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["rich>=13.0"]
+dependencies = ["rich>=13.0", "pygments>=2.20.0"]
 
 [project.scripts]
 claude-history = "claude_history_manager.cli:main"
